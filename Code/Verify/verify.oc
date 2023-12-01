@@ -1,0 +1,304 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <assert.h>
+#include <obliv.oh>
+#include <math.h>
+
+#include "verify.h"
+
+OblivPoint toOblivPoint(Point p, int party) {
+    obliv float ox = feedOblivFloat(p.x, party);
+    obliv float oy = feedOblivFloat(p.y, party);
+    obliv float ot = feedOblivFloat((float)p.t, party);
+    OblivPoint op = {ot, ox, oy};
+    return op;
+}
+
+bool verifyOneRefTraj(protocolIO* io, RefTrajectory* rt, Trajectory* test) {
+    int testlen = (ocCurrentParty() == 2)? 0 : test->len;
+    testlen = ocBroadcastInt(testlen, 1);
+    int rlen = io->grid_num;
+
+    OblivPoint* testps = (OblivPoint*)calloc(testlen, sizeof(OblivPoint));
+    for (int testid = 0; testid < testlen; testid++) {
+        if (ocCurrentParty() == 1) {
+            testps[testid] = toOblivPoint(test->p[testid], 1);
+        }
+        else {
+            Point dummy = {0, 0.0, 0.0};
+            testps[testid] = toOblivPoint(dummy, 1);
+        }
+    }
+    // log_info("TestTrajectory To Obliv, testlen = %d\n", testlen);
+
+    obliv float* kxs = (obliv float*)calloc(rlen, sizeof(obliv float));
+    obliv float* bxs = (obliv float*)calloc(rlen, sizeof(obliv float));
+    obliv float* kys = (obliv float*)calloc(rlen, sizeof(obliv float));
+    obliv float* bys = (obliv float*)calloc(rlen, sizeof(obliv float));
+    obliv float* ts1 = (obliv float*)calloc(rlen, sizeof(obliv float));
+    obliv float* ts2 = (obliv float*)calloc(rlen, sizeof(obliv float));
+
+    for (int rid = 0; rid < rlen; rid++) {
+        if (ocCurrentParty() == 2) {
+            float kx = (rt->p1[rid].x - rt->p2[rid].x) / (rt->p1[rid].t - rt->p2[rid].t);
+            float bx = rt->p1[rid].x - kx * rt->p1[rid].t;
+            float ky = (rt->p1[rid].y - rt->p2[rid].y) / (rt->p1[rid].t - rt->p2[rid].t);
+            float by = rt->p1[rid].y - ky * rt->p1[rid].t;
+            kxs[rid] = feedOblivFloat(kx, 2);
+            bxs[rid] = feedOblivFloat(bx, 2);
+            kys[rid] = feedOblivFloat(ky, 2);
+            bys[rid] = feedOblivFloat(by, 2);
+            ts1[rid] = feedOblivFloat((float)rt->p1[rid].t, 2);
+            ts2[rid] = feedOblivFloat((float)rt->p2[rid].t, 2);
+        }
+        else {
+            kxs[rid] = feedOblivFloat(0.0, 2);
+            bxs[rid] = feedOblivFloat(0.0, 2);
+            kys[rid] = feedOblivFloat(0.0, 2);
+            bys[rid] = feedOblivFloat(0.0, 2);
+            ts1[rid] = feedOblivFloat(0.0, 2);
+            ts2[rid] = feedOblivFloat(0.0, 2);
+        }
+    }
+    
+    obliv int valid_cnt = feedOblivInt(0, 1);
+    obliv int obliv_one = feedOblivInt(1, 1);
+    obliv float obliv_big_thres_square = feedOblivFloat(io->grid_size * io->grid_size * 2, 1);
+    
+    for (int testid = 0; testid < testlen; testid++) {
+        obliv int valid = feedOblivInt(0, 1);
+        for (int rid = 0; rid < rlen; rid++) {
+            obliv float cor_point_x = kxs[rid] * testps[testid].ot + bxs[rid];
+            obliv float cor_point_y = kys[rid] * testps[testid].ot + bys[rid];
+            obliv float delta_x = cor_point_x - testps[testid].ox;
+            obliv float delta_y = cor_point_y - testps[testid].oy;
+            obliv float dis = delta_x * delta_x + delta_y * delta_y;
+
+            /*{
+                float cx, cy, cd;
+                revealOblivFloat(&cx, cor_point_x, 0);
+                revealOblivFloat(&cy, cor_point_y, 0);
+                revealOblivFloat(&cd, dis, 0);
+                if (ocCurrentParty() == 1) {
+                    log_info("ori = (%d, %f, %f), new = (%f, %f), dis = %f\n", test->p[testid].t, test->p[testid].x, test->p[testid].y, cx, cy, cd);
+                }
+            }*/
+
+            obliv if (testps[testid].ot >= ts1[rid]) {
+                obliv if (testps[testid].ot <= ts2[rid]) {
+                    obliv if (dis < obliv_big_thres_square) {
+                        valid = obliv_one;
+                    }
+                }
+            }
+        }
+        valid_cnt = valid_cnt + valid;
+    }
+
+    obliv int expected = feedOblivInt(testlen, 1);
+    obliv bool ov = (expected == valid_cnt);
+    bool v = false;
+    revealOblivBool(&v, ov, 0);
+
+    return v;
+}
+
+int verifyRefTrajs(protocolIO* io, int** valid_par) {
+    int valid_num = 0;
+    *valid_par = (int*)calloc(io->par_num, sizeof(int));
+
+    io->grid_num = ocBroadcastInt(io->grid_num, 2);
+    log_info("Begin verify RefTrajectories, grid_num = %d, par_num = %d\n", io->grid_num, io->par_num);
+
+    for (int r = 0; r < io->par_num; r++) {
+        log_info("Verify RefTrajectory %d\n", r);
+        bool success;
+        if (ocCurrentParty() == 1) {
+            success = verifyOneRefTraj(io, NULL, testTraj);
+        }
+        else {
+            success = verifyOneRefTraj(io, &(refTrajs[r]), NULL);
+        }
+        if (success) {
+            log_info("Partition %d valid\n", r);
+            (*valid_par)[valid_num++] = r;
+        }
+    }
+    log_info("End verify RefTrajectories, valid_num = %d\n", valid_num);
+    return valid_num;
+}
+
+bool verifyOneTraj(protocolIO* io, Trajectory* traj, Trajectory* test, int testlen, int start_id, int end_id) {
+    if (ocCurrentParty() == 2) {
+        log_info("Begin verify Trajectory %d, (%d, %d)\n", traj->tid, start_id, end_id);
+    }
+
+    OblivPoint* testps = (OblivPoint*)calloc(testlen, sizeof(OblivPoint));
+    for (int testid = 0; testid < testlen; testid++) {
+        if (ocCurrentParty() == 1) {
+            testps[testid] = toOblivPoint(test->p[testid], 1);
+        }
+        else {
+            Point dummy = {0, 0.0, 0.0};
+            testps[testid] = toOblivPoint(dummy, 1);
+        }
+    }
+    log_info("TestTrajectory To Obliv, testlen = %d\n", testlen);
+
+    obliv float* kxs = (obliv float*)calloc(end_id - start_id - 1, sizeof(obliv float));
+    obliv float* bxs = (obliv float*)calloc(end_id - start_id - 1, sizeof(obliv float));
+    obliv float* kys = (obliv float*)calloc(end_id - start_id - 1, sizeof(obliv float));
+    obliv float* bys = (obliv float*)calloc(end_id - start_id - 1, sizeof(obliv float));
+    obliv float* ts = (obliv float*)calloc(end_id - start_id, sizeof(obliv float));
+
+    for (int i = 0; i < end_id - start_id - 1; i++) {
+        int tid = start_id + i;
+        if (ocCurrentParty() == 2) {
+            float kx = (traj->p[tid + 1].x - traj->p[tid].x) / (traj->p[tid + 1].t - traj->p[tid].t);
+            float bx = traj->p[tid].x - kx * traj->p[tid].t;
+            float ky = (traj->p[tid + 1].y - traj->p[tid].y) / (traj->p[tid + 1].t - traj->p[tid].t);
+            float by = traj->p[tid].y - ky * traj->p[tid].t;
+            kxs[i] = feedOblivFloat(kx, 2);
+            bxs[i] = feedOblivFloat(bx, 2);
+            kys[i] = feedOblivFloat(ky, 2);
+            bys[i] = feedOblivFloat(by, 2);
+            ts[i] = feedOblivFloat((float)traj->p[tid].t, 2);
+        }
+        else {
+            kxs[i] = feedOblivFloat(0.0, 2);
+            bxs[i] = feedOblivFloat(0.0, 2);
+            kys[i] = feedOblivFloat(0.0, 2);
+            bys[i] = feedOblivFloat(0.0, 2);
+            ts[i] = feedOblivFloat(0.0, 2);
+        }
+    }
+    if (ocCurrentParty() == 2) {
+        ts[end_id - start_id - 1] = feedOblivFloat((float)traj->p[end_id - 1].t, 2);
+    }
+    else {
+        ts[end_id - start_id - 1] = feedOblivFloat(0.0, 2);
+    }
+    log_info("Trajectory To Obliv, tlen = %d\n", end_id - start_id);
+    
+    obliv int valid_cnt = feedOblivInt(0, 1);
+    obliv int obliv_one = feedOblivInt(1, 1);
+    obliv float obliv_thres_square = feedOblivFloat(io->thres * io->thres, 1);
+
+    for (int testid = 0; testid < testlen; testid++) {
+        obliv int valid = feedOblivInt(0, 1);
+        for (int i = 0; i < end_id - start_id - 1; i++) {
+            obliv float cor_point_x = kxs[i] * testps[testid].ot + bxs[i];
+            obliv float cor_point_y = kys[i] * testps[testid].ot + bys[i];
+            obliv float delta_x = cor_point_x - testps[testid].ox;
+            obliv float delta_y = cor_point_y - testps[testid].oy;
+            obliv float dis = delta_x * delta_x + delta_y * delta_y;
+            obliv if (testps[testid].ot >= ts[i]) {
+                obliv if (testps[testid].ot <= ts[i + 1]) {
+                    obliv if (dis < obliv_thres_square) {
+                        valid = obliv_one;
+                    }
+                }
+            }
+        }
+        valid_cnt = valid_cnt + valid;
+    }
+
+    obliv int expected = feedOblivInt(testlen, 1);
+    obliv bool ov = (expected == valid_cnt);
+    bool v = false;
+    revealOblivBool(&v, ov, 0);
+    return v;
+}
+
+bool verifyOneTrajWithRange(protocolIO* io, Trajectory* traj, Trajectory* test, int testlen, int tlen, int start_time, int end_time) {
+    bool early_abandon = false;
+    if (ocCurrentParty() == 2) {
+        if (traj->p[0].t > start_time || traj->p[traj->len - 1].t < end_time) {
+            early_abandon = true;
+            log_info("Traj %d early abandon\n", traj->tid);
+        }
+    }
+    early_abandon = ocBroadcastBool(early_abandon, 2);
+    if (early_abandon) {
+        return false;
+    }
+
+    int start_id = 0, end_id = tlen;
+    if (ocCurrentParty() == 2) {
+        for (int i = 1; i < tlen; i++) {
+            if (traj->p[i].t >= start_time) {
+                start_id = i - 1;
+                break;
+            }
+        }
+        for (int i = tlen - 1; i >= 0; i--) {
+            if (traj->p[i].t <= end_time) {
+                end_id = i + 1;
+                break;
+            }
+        }
+    }
+    start_id = ocBroadcastInt(start_id, 2);
+    end_id = ocBroadcastInt(end_id, 2);
+
+    return verifyOneTraj(io, traj, test, testlen, start_id, end_id);
+}
+
+void verifyAllTrajs(protocolIO* io, int all_num) {
+    int testlen = (ocCurrentParty() == 2)? 0 : testTraj->len;
+    testlen = ocBroadcastInt(testlen, 1);
+
+    int start_time = (ocCurrentParty() == 2)? 0 : testTraj->p[0].t;
+    start_time = ocBroadcastInt(start_time, 1);
+    int end_time = (ocCurrentParty() == 2)? 0 : testTraj->p[testTraj->len - 1].t;
+    end_time = ocBroadcastInt(end_time, 1);
+    log_info("time range = (%d, %d)\n", start_time, end_time);
+
+    log_info("Begin verify Trajectories, all_num = %d\n", all_num);
+    for (int i = 0; i < all_num; i++) {
+        int tlen = (ocCurrentParty() == 1)? 0 : allTrajs[i].len;
+        tlen = ocBroadcastInt(tlen, 2);
+
+        bool success;
+        if (ocCurrentParty() == 1) {
+            success = verifyOneTraj(io, NULL, testTraj, testlen, 0, tlen);
+            // success = verifyOneTrajWithRange(io, NULL, testTraj, testlen, tlen, start_time, end_time);
+        }
+        else {
+            success = verifyOneTraj(io, allTrajs + i, NULL, testlen, 0, tlen);
+            // success = verifyOneTrajWithRange(io, allTrajs + i, NULL, testlen, tlen, start_time, end_time);
+            if (success) {
+                log_info("candidate: %d\n", allTrajs[i].tid);
+            }
+        }
+    }
+}
+
+void Verify(void* args) {
+    protocolIO *io = (protocolIO*) args;
+    loadInfo(io);
+    if (ocCurrentParty() == 1) {
+        loadTestTraj(io);
+    }
+    else {
+        loadRefTrajs(io);
+    }
+
+    double ref_st = wallClock();
+    int* valid_par;
+    int valid_num = verifyRefTrajs(io, &valid_par);
+    log_info("verifyRefTrajs time: %lf\n", wallClock() - ref_st);
+
+    int all_num = 0;
+    if (ocCurrentParty() == 2) {
+        all_num = loadAllTrajs(io, valid_num, valid_par);
+        all_num = ocBroadcastInt(all_num, 2);
+    }
+    else {
+        all_num = ocBroadcastInt(0, 2);
+    }
+
+    double all_st = wallClock();
+    verifyAllTrajs(io, all_num);
+    log_info("verifyAllTrajs time: %lf\n", wallClock() - all_st);
+}
