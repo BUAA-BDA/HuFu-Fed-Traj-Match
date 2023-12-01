@@ -7,7 +7,7 @@ python3 ./geoi.py --eps 0.01 --delta 0.00001
 Command of Query Trajectory Publish:
 
 ```shell
-python3 ./geoi.py --grid True --eps 0.01 --delta 0.00001 --dataset Dazhong
+python3 ./publish.py --grid True --eps 0.01 --delta 0.00001 --dataset Dazhong
 ```
 
 Command of Filter:
